@@ -12,3 +12,14 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# My additions to the template:
+
+# macOS stuff:
+server.dSYM
+.DS_Store
+
+# C executables specific to this assignment:
+server
+epoll_server
+a.out
