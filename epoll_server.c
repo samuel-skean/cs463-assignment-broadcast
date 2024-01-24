@@ -2,13 +2,31 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h> // TODO: What's the difference between this and sys/socket.h,
                         // and why should I care?
 #include <sys/epoll.h>
 
-#define MAX_FDS 20 // STRETCH TODO: Try increasing this.
+// Info on Design Badness:
+// Right now I record the sockets of each client in an array (client_sockets) indexed with another number for each client, 
+// so I can loop through that array and send messages only to clients that I have an actual connection with. Empty spaces
+// in this array of clients are represented by 0 (which is a valid file descriptor, but not a vaild file descriptor for a client).
+// This is how Eriksson did it in his multithreaded server.
+// I think I could alternately do this by simply trying to send on the whole range of possible file descriptors, but that would
+// mean more error-handling in C (yikes) and would probably be worse performance wise. Look before you leap is generally preferable to me anyway.
+//
+// However, I store the *states* of the connection with each client in an array of structs indexed directly by the socket file descriptor, not that client's index in the other array.
+// This is so I can directly access it in the handle_client function, which takes the socket file descriptor. This is easier because the call to epoll_wait in main gives a list of
+// file descriptors that are ready for reading, and not anything else.
 
+// Realization?: All I want to do is store whether the file_descriptor is *good* or not for each possible file descriptor. I can do this with an array of booleans, indexed into with the file descriptor.
+
+#define MAX_CLIENTS 10 // STRETCH TODO: Try increasing this. What happens if it gets exceeded?
+
+#define MAX_FD 20 // STRETCH TODO: Try unifying this with MAX_CLIENTS.
+
+int client_sockets[MAX_CLIENTS] = {}; // Holds the file descriptors for any clients currently connected. If there is no client connected with that number, holds 0.
 
 void unrecoverable_error(char* error_string) {
     const char* fatal = "FATAL: ";
@@ -50,15 +68,15 @@ struct {
     size_t buffer_size;
     size_t used_bytes;
     int messages_sent;
-} client_socket_states[MAX_FDS]; // This array is indexed into with file descriptors. Thank god they start numbering pretty low!
+} client_socket_states[MAX_CLIENTS];
 
 // Returns 1 when the client socket should stay open, 0 when the client socket should be closed.
 int handle_client(int socket) {
     while (1) {
         // TODO: Make sure there's enough room to at least read *some* more. I'm curious how his original code handles the fact that a client's message could be arbitrarily long, but I'll just use realloc, I think.
         int num_bytes_read = read(socket, client_socket_states[socket].buffer +
-                client_socket_states[socket].used_bytes, client_socket_states[socket].buffer_size - client_socket_states.used_bytes);
-        if (num_read_bytes == -1) { // This return value means some "error" occurred.
+                client_socket_states[socket].used_bytes, client_socket_states[socket].buffer_size - client_socket_states[socket].used_bytes);
+        if (num_bytes_read == -1) { // This return value means some "error" occurred.
             switch(errno) {
                 case EAGAIN: break; // There may be more to read later.
                 default:
@@ -66,7 +84,7 @@ int handle_client(int socket) {
             }
             break;
         }
-        if (num_read_bytes == 0) {
+        if (num_bytes_read == 0) { // This connection is finished.
             return 0;
         }
 
