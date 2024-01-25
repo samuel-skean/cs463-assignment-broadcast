@@ -9,10 +9,11 @@
 #include <sys/epoll.h>
 
 #define MAX_FDS 20 // STRETCH TODO: Try increasing this.
+#define INITIAL_BUFFER_SIZE 200
 
 // Assumption: The server does not have to deal with clients sending the null byte.
 
-struct { 
+struct {
     char* buffer;
     size_t buffer_size;
     size_t used_bytes;
@@ -75,7 +76,7 @@ int handle_client(int socket) {
             switch(errno) {
                 case EAGAIN: break; // There may be more to read later.
                 default:
-                    printf("Error on socket %d\n", socket); // An actual error occurred.
+                    fprintf(stderr, "Error on socket %d\n", socket); // An actual error occurred.
             }
             break;
         }
@@ -96,6 +97,7 @@ int handle_client(int socket) {
         int message_len;
         while (sscanf(next_message_ptr, "%[^\n]%n\n", message_buffer, &message_len) != EOF) {
             broadcast_message(message_buffer, socket);
+            client_socket_states[socket].messages_sent++;
             next_message_ptr += message_len + 1;
         }
         if (next_message_ptr != client_socket_states[socket].buffer) {
@@ -182,7 +184,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Accept incoming connections
-    puts("Waiting for incoming connections...");
+    fputs("Waiting for incoming connections...\n", stderr);
 
     const int MAXEVENTS = 1000;
     struct epoll_event event; // event to use to add more file descriptors to wait on?
@@ -213,8 +215,13 @@ int main(int argc, char* argv[]) {
                     perror("epoll_ctl failed on adding client socket");
                 }
                 set_socket_non_blocking(conn_fd);
+
+                client_socket_states[conn_fd].buffer = calloc(INITIAL_BUFFER_SIZE, sizeof(char)); // TODO: switch to malloc to catch more bugs (there are lots of cases where we don't zero out the buffer anyway, and we shouldn't need it to be zeroed
+                client_socket_states[conn_fd].buffer_size = INITIAL_BUFFER_SIZE;
+
+                fputs("Accepted a client's connection!\n", stderr);
             } else { // We are dealing with a client connection.
-                puts("Received something from a client, ready to read it.");
+                fputs("Received something from a client, ready to read it.\n", stderr);
                 if (!handle_client(events[i].data.fd)) {
                     epoll_ctl(epoll_file_descriptor, EPOLL_CTL_DEL, events[i].data.fd, 0);
                     close(events[i].data.fd);
