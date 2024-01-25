@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -9,8 +10,17 @@
 
 #define MAX_FDS 20 // STRETCH TODO: Try increasing this.
 
+// Assumption: The server does not have to deal with clients sending the null byte.
 
-void unrecoverable_error(char* error_string) {
+struct { 
+    char* buffer;
+    size_t buffer_size;
+    size_t used_bytes;
+    int messages_sent;
+} client_socket_states[MAX_FDS] = {/* Default initialize it, just in case */}; // This array is indexed into with file descriptors. Thank god they start numbering pretty low!
+
+
+void panic(char* error_string) {
     const char* fatal = "FATAL: ";
     char output[100]; // I happen to know that all my error messages are smaller than this.
     strcpy(output, fatal);
@@ -34,31 +44,34 @@ void set_socket_non_blocking(int socket_fd) {
     }
 }
 
-// This code is copied verbatim from the example server.c code.
+// This code is slightly modified from the example server.c code.
 void broadcast_message(char *message, int sender_sd) {
 
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        int sd = client_sockets[i];
-        if (sd > 0 && sd != sender_sd) {
+    for (int sd = 0; sd < MAX_FDS; sd++) {
+        if ((client_socket_states[sd].buffer != NULL) && sd != sender_sd) {
             send(sd, message, strlen(message), 0);
         }
     }
 }
 
-struct {
-    char* buffer;
-    size_t buffer_size;
-    size_t used_bytes;
-    int messages_sent;
-} client_socket_states[MAX_FDS]; // This array is indexed into with file descriptors. Thank god they start numbering pretty low!
 
 // Returns 1 when the client socket should stay open, 0 when the client socket should be closed.
 int handle_client(int socket) {
     while (1) {
         // TODO: Make sure there's enough room to at least read *some* more. I'm curious how his original code handles the fact that a client's message could be arbitrarily long, but I'll just use realloc, I think.
+        if (client_socket_states[socket].buffer_size == client_socket_states[socket].used_bytes) {
+            // No more room in the buffer, make more:
+            client_socket_states[socket].buffer_size *= 2;
+            client_socket_states[socket].buffer =
+                realloc(client_socket_states[socket].buffer,
+                        client_socket_states[socket].buffer_size); // grow the buffer by a factor of 2
+        }
+
         int num_bytes_read = read(socket, client_socket_states[socket].buffer +
-                client_socket_states[socket].used_bytes, client_socket_states[socket].buffer_size - client_socket_states.used_bytes);
-        if (num_read_bytes == -1) { // This return value means some "error" occurred.
+                client_socket_states[socket].used_bytes,
+                (client_socket_states[socket].buffer_size -
+                    client_socket_states[socket].used_bytes) - 1); // We put a null byte at the end of this in the next step, so we can't read into the last byte of the buffer.
+        if (num_bytes_read == -1) { // This return value means some "error" occurred.
             switch(errno) {
                 case EAGAIN: break; // There may be more to read later.
                 default:
@@ -66,11 +79,34 @@ int handle_client(int socket) {
             }
             break;
         }
-        if (num_read_bytes == 0) {
+
+        if (num_bytes_read == 0) {
             return 0;
         }
+        // The user might send multiple messages at once, or take a long time to send one message.
+        // Here, we read and deal with all the messages we got at once and copy any leftover
+        // bytes (the start of a next message, presumably) into the start of the buffer again.
 
+        char* const end_of_meaningful_buffer = client_socket_states[socket].buffer + client_socket_states[socket].used_bytes + num_bytes_read;
+        *end_of_meaningful_buffer = '\0'; // put a null byte at the end of the string we just read in so sscanf is happy.
 
+        char* next_message_ptr = client_socket_states[socket].buffer;
+        // TODO: I think I can get rid of the message buffer and batch any messages gotten in one go into one big message to the clients, with lots of newlines.
+        char* message_buffer = malloc(client_socket_states[socket].buffer_size); // The buffer to put the newline-terminated messages into, as we read them.
+        int message_len;
+        while (sscanf(next_message_ptr, "%[^\n]%n\n", message_buffer, &message_len) != EOF) {
+            broadcast_message(message_buffer, socket);
+            next_message_ptr += message_len + 1;
+        }
+        if (next_message_ptr != client_socket_states[socket].buffer) {
+            memmove(client_socket_states[socket].buffer, next_message_ptr,
+                    end_of_meaningful_buffer
+                    - next_message_ptr /* the start of this last message */);
+        }
+        client_socket_states[socket].used_bytes = end_of_meaningful_buffer - next_message_ptr;
+    }
+    return 1;
+}
 
 
 
@@ -90,7 +126,7 @@ int main(int argc, char* argv[]) {
                            // Did Eriksson forget about this?
             default: // Can we ever even reach here, or was Eriksson just
                      // practicing defensive coding?
-                abort();
+                panic("Unexpected error parsing options.");
         }
     }
 
@@ -117,7 +153,7 @@ int main(int argc, char* argv[]) {
         // type = SOCK_STREAM: two-way stream
         // protocol = 0: use the default protocol associated with this domain 
     if (listen_fd == -1) {
-        unrecoverable_error("Could not create socket");
+        panic("Could not create socket");
     }
 
     int reuseaddr_opt = 1; // we want to set the reuseaddr option to true
@@ -125,7 +161,7 @@ int main(int argc, char* argv[]) {
         // SOL_SOCKET - SOcketLevel_SOCKET: set options at the socket API level 
         //      (presumably the highest level allowed)
         // SO_REUSEADDR: the actual option we're setting, allow addresses to be reused quickly when the program quits. https://www.baeldung.com/linux/socket-options-difference - tries to explain it, but explicitly refers to BSD over Linux and is confusing (and sort of conflicting with some other info online, that says that at most one socket can every have a given address-port pair - this program might conflict with that though, with multiple clients ending up connected on the same port).
-        unrecoverable_error("setsockopt failed");
+        panic("setsockopt failed");
     }
 
     // TODO: Replace with the 'easier' method on page 607 of CS 361 Notebook.pdf
@@ -136,13 +172,13 @@ int main(int argc, char* argv[]) {
 
     // Bind the port that listens:
     if (bind(listen_fd, (struct sockaddr*) &server, sizeof(server)) < 0) {
-        unrecoverable_error("bind failed");
+        panic("bind failed");
     }
 
 
     if (listen(listen_fd, 3) < 0) { // backlog = 3: buffer of 3 connections held by
                                     // the kernel for us
-        unrecoverable_error("listen failed");
+        panic("listen failed");
     }
 
     // Accept incoming connections
@@ -157,7 +193,7 @@ int main(int argc, char* argv[]) {
     event.data.fd = listen_fd;
     event.events = EPOLLIN;
     if (epoll_ctl(epoll_file_descriptor, EPOLL_CTL_ADD, listen_fd, &event)) {
-        unrecoverable_error("epoll_ctl failed on adding listen_fd");
+        panic("epoll_ctl failed on adding listen_fd");
     }
 
     while (1) { // We can no longer simply block on accept in the loop, since if we block, the server does no work
@@ -178,7 +214,12 @@ int main(int argc, char* argv[]) {
                 }
                 set_socket_non_blocking(conn_fd);
             } else { // We are dealing with a client connection.
-                puts("Received something from a client, ready to read it.\n");
+                puts("Received something from a client, ready to read it.");
+                if (!handle_client(events[i].data.fd)) {
+                    epoll_ctl(epoll_file_descriptor, EPOLL_CTL_DEL, events[i].data.fd, 0);
+                    close(events[i].data.fd);
+                    client_socket_states[events[i].data.fd].buffer = NULL;
+                }
             }
         }
     }
