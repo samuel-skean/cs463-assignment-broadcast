@@ -29,7 +29,7 @@ fn main() {
     // Connect to the server
     match TcpStream::connect(addr) {
         Ok(mut stream) => {
-            println!("Successfully connected to server in port 9090");
+            println!("Successfully connected to server in port {0}", opt.port);
 
             // Split the TcpStream for simultaneous read and write
             let mut reader = stream.try_clone().expect("clone failed...");
