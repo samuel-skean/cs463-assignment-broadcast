@@ -9,7 +9,7 @@
 #include <sys/epoll.h>
 
 #define MAX_FDS 20 // STRETCH TODO: Try increasing this.
-#define INITIAL_BUFFER_SIZE 200
+#define INITIAL_BUFFER_SIZE 10
 
 // Assumption: The server does not have to deal with clients sending the null byte.
 
@@ -96,6 +96,7 @@ int handle_client(int socket) {
         char* message_buffer = malloc(client_socket_states[socket].buffer_size); // The buffer to put the newline-terminated messages into, as we read them.
         int message_len;
         while (sscanf(next_message_ptr, "%[^\n]%n\n", message_buffer, &message_len) != EOF) {
+            strcat(message_buffer, "\n"); // Add the newline back to the message.
             broadcast_message(message_buffer, socket);
             client_socket_states[socket].messages_sent++;
             next_message_ptr += message_len + 1;
