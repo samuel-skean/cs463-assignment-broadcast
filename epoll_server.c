@@ -46,11 +46,11 @@ void set_socket_non_blocking(int socket_fd) {
 }
 
 // This code is slightly modified from the example server.c code.
-void broadcast_message(char *message, int sender_sd) {
+void broadcast_message(char *message, int message_len, int sender_sd) {
 
     for (int sd = 0; sd < MAX_FDS; sd++) {
         if ((client_socket_states[sd].buffer != NULL) && sd != sender_sd) {
-            send(sd, message, strlen(message), 0);
+            send(sd, message, message_len, 0);
         }
     }
 }
@@ -70,8 +70,8 @@ int handle_client(int socket) {
 
         int num_bytes_read = read(socket, client_socket_states[socket].buffer +
                 client_socket_states[socket].used_bytes,
-                (client_socket_states[socket].buffer_size -
-                    client_socket_states[socket].used_bytes) - 1); // We put a null byte at the end of this in the next step, so we can't read into the last byte of the buffer.
+                client_socket_states[socket].buffer_size -
+                    client_socket_states[socket].used_bytes);
         if (num_bytes_read == -1) { // This return value means some "error" occurred.
             switch(errno) {
                 case EAGAIN: break; // There may be more to read later.
@@ -89,24 +89,22 @@ int handle_client(int socket) {
         // bytes (the start of a next message, presumably) into the start of the buffer again.
 
         char* const end_of_meaningful_buffer = client_socket_states[socket].buffer + client_socket_states[socket].used_bytes + num_bytes_read;
-        *end_of_meaningful_buffer = '\0'; // put a null byte at the end of the string we just read in so sscanf is happy.
 
-        char* next_message_ptr = client_socket_states[socket].buffer;
+        char* curr_message_ptr = client_socket_states[socket].buffer;
         // TODO: I think I can get rid of the message buffer and batch any messages gotten in one go into one big message to the clients, with lots of newlines.
-        char* message_buffer = malloc(client_socket_states[socket].buffer_size); // The buffer to put the newline-terminated messages into, as we read them.
-        int message_len;
-        while (sscanf(next_message_ptr, "%[^\n]%n\n", message_buffer, &message_len) != EOF) {
-            strcat(message_buffer, "\n"); // Add the newline back to the message.
-            broadcast_message(message_buffer, socket);
+        char* next_message_ptr;
+        while ((next_message_ptr = (char*) memchr(curr_message_ptr, '\n', end_of_meaningful_buffer - curr_message_ptr) + 1) != NULL + 1) {
+            broadcast_message(curr_message_ptr, next_message_ptr - curr_message_ptr, socket);
             client_socket_states[socket].messages_sent++;
-            next_message_ptr += message_len + 1;
+            curr_message_ptr = next_message_ptr;
         }
-        if (next_message_ptr != client_socket_states[socket].buffer) {
-            memmove(client_socket_states[socket].buffer, next_message_ptr,
+        if ((curr_message_ptr != client_socket_states[socket].buffer)
+                && (curr_message_ptr != end_of_meaningful_buffer)) {
+            memmove(client_socket_states[socket].buffer, curr_message_ptr,
                     end_of_meaningful_buffer
-                    - next_message_ptr /* the start of this last message */);
+                    - curr_message_ptr /* the start of this last message */);
         }
-        client_socket_states[socket].used_bytes = end_of_meaningful_buffer - next_message_ptr;
+        client_socket_states[socket].used_bytes = end_of_meaningful_buffer - curr_message_ptr;
     }
     return 1;
 }
@@ -220,12 +218,14 @@ int main(int argc, char* argv[]) {
                 client_socket_states[conn_fd].buffer = calloc(INITIAL_BUFFER_SIZE, sizeof(char)); // TODO: switch to malloc to catch more bugs (there are lots of cases where we don't zero out the buffer anyway, and we shouldn't need it to be zeroed
                 client_socket_states[conn_fd].buffer_size = INITIAL_BUFFER_SIZE;
 
-                fputs("Accepted a client's connection!\n", stderr);
+                fprintf(stderr, "Accepted a client's connection on socket %d!\n", conn_fd);
             } else { // We are dealing with a client connection.
                 fputs("Received something from a client, ready to read it.\n", stderr);
                 if (!handle_client(events[i].data.fd)) {
+                    fprintf(stderr, "Closing socket %d.\n", events[i].data.fd);
                     epoll_ctl(epoll_file_descriptor, EPOLL_CTL_DEL, events[i].data.fd, 0);
                     close(events[i].data.fd);
+                    free(client_socket_states[events[i].data.fd].buffer);
                     client_socket_states[events[i].data.fd].buffer = NULL;
                 }
             }
