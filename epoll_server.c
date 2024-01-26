@@ -77,6 +77,7 @@ int handle_client(int socket) {
                 case EAGAIN: break; // There may be more to read later.
                 default:
                     fprintf(stderr, "Error on socket %d\n", socket); // An actual error occurred.
+                    perror("");
             }
             break;
         }
@@ -220,7 +221,7 @@ int main(int argc, char* argv[]) {
 
                 fprintf(stderr, "Accepted a client's connection on socket %d!\n", conn_fd);
             } else { // We are dealing with a client connection.
-                fputs("Received something from a client, ready to read it.\n", stderr);
+                fprintf(stderr, "Dealing with client on socket %d\n", events[i].data.fd);
                 if (!handle_client(events[i].data.fd)) {
                     fprintf(stderr, "Closing socket %d.\n", events[i].data.fd);
                     epoll_ctl(epoll_file_descriptor, EPOLL_CTL_DEL, events[i].data.fd, 0);
