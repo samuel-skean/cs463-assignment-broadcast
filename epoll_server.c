@@ -19,7 +19,7 @@ struct {
     size_t used_bytes;
     int messages_sent;
 } client_socket_states[MAX_FDS] = {/* Default initialize it, just in case */}; // This array is indexed into with file descriptors. Thank god they start numbering pretty low!
-
+// NOTE: The fact that file descriptors start numbering low is not reliable behavior, but seems to work for basic examples.
 
 void panic(char* error_string) {
     const char* fatal = "FATAL: ";
@@ -150,17 +150,17 @@ int main(int argc, char* argv[]) {
     struct sockaddr_in server; // This "_in" has nothing at all to do with the address being an "in" address (whatever that would mean), it just means that the address is an INternet address. I really dislike APIs that can't be bothered to speak English.
 
     // Create socket
-    listen_fd = socket(AF_INET, SOCK_STREAM, 0); 
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
         // domain = AF_INET: IPv4
         // type = SOCK_STREAM: two-way stream
-        // protocol = 0: use the default protocol associated with this domain 
+        // protocol = 0: use the default protocol associated with this domain
     if (listen_fd == -1) {
         panic("Could not create socket");
     }
 
     int reuseaddr_opt = 1; // we want to set the reuseaddr option to true
     if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_opt, sizeof(reuseaddr_opt))) {
-        // SOL_SOCKET - SOcketLevel_SOCKET: set options at the socket API level 
+        // SOL_SOCKET - SOcketLevel_SOCKET: set options at the socket API level
         //      (presumably the highest level allowed)
         // SO_REUSEADDR: the actual option we're setting, allow addresses to be reused quickly when the program quits. https://www.baeldung.com/linux/socket-options-difference - tries to explain it, but explicitly refers to BSD over Linux and is confusing (and sort of conflicting with some other info online, that says that at most one socket can every have a given address-port pair - this program might conflict with that though, with multiple clients ending up connected on the same port).
         panic("setsockopt failed");
