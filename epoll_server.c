@@ -9,22 +9,54 @@
 #include <sys/epoll.h>
 
 #define MAX_FDS 20 // STRETCH TODO: Try increasing this.
-#define INITIAL_BUFFER_SIZE 10
+#define INITIAL_SLICE_SIZE 10
 
 // Assumption: The server does not have to deal with clients sending the null byte.
 
-struct {
+struct Slice {
     char* buffer;
-    size_t buffer_size;
-    size_t used_bytes;
+    size_t length;
+    size_t capacity;
+};
+
+struct Slice init_slice() { // TODO: How much worse is this than initializing it inline? Can there be something like copy-elision going on here?
+    struct Slice new_slice = { // Why does it seem necessary to split this from the return? Are the semantics different?
+        .buffer = calloc(INITIAL_SLICE_SIZE, sizeof(char)),
+                    // TODO: switch to malloc to catch more bugs (there are lots of cases where we don't zero out the buffer anyway, and we shouldn't need it to be zeroed
+        .length = 0,
+        .capacity = INITIAL_SLICE_SIZE,
+    };
+    return new_slice;
+}
+
+void deinit_slice(struct Slice* slice_ptr) { // TODO: Kind of a disgusting name, I blame Faultlore.
+    free(slice_ptr->buffer);
+    slice_ptr->buffer = NULL;
+}
+
+void grow_slice(struct Slice* slice_ptr) {
+    slice_ptr->capacity *= 2;
+    slice_ptr->buffer = realloc(slice_ptr->buffer, slice_ptr->capacity);
+}
+
+void add_to_slice(struct Slice* slice_ptr, char* to_add, size_t length_to_add) {
+    if (slice_ptr->length + length_to_add > slice_ptr->capacity) {
+        grow_slice(slice_ptr);
+    }
+    memmove(slice_ptr->buffer + slice_ptr->length, to_add, length_to_add);
+}
+
+struct {
+    struct Slice data_from;
     int messages_sent;
-} client_socket_states[MAX_FDS] = {/* Default initialize it, just in case */}; // This array is indexed into with file descriptors. Thank god they start numbering pretty low!
+} client_states[MAX_FDS] = {/* Default initialize it, just in case */};
+    // This array is indexed into with file descriptors. Thank god they start numbering pretty low!
 
 
 void panic(char* error_string) {
     const char* fatal = "FATAL: ";
     char output[100]; // I happen to know that all my error messages are smaller than this.
-    strcpy(output, fatal);
+    strcpy(output, fatal); // TODO: Use sprintf? It's safer, but does it incur an additional allocation?
     strcat(output, error_string);
     perror(output);
     exit(EXIT_FAILURE);
@@ -49,7 +81,7 @@ void set_socket_non_blocking(int socket_fd) {
 void broadcast_message(char *message, int message_len, int sender_sd) {
 
     for (int sd = 0; sd < MAX_FDS; sd++) {
-        if ((client_socket_states[sd].buffer != NULL) && sd != sender_sd) {
+        if ((client_states[sd].data_from.buffer != NULL) && sd != sender_sd) {
             send(sd, message, message_len, 0);
         }
     }
@@ -60,24 +92,21 @@ void broadcast_message(char *message, int message_len, int sender_sd) {
 int handle_client(int socket) {
     while (1) {
         // TODO: Make sure there's enough room to at least read *some* more. I'm curious how his original code handles the fact that a client's message could be arbitrarily long, but I'll just use realloc, I think.
-        if (client_socket_states[socket].buffer_size == client_socket_states[socket].used_bytes) {
+        if (client_states[socket].data_from.length == client_states[socket].data_from.capacity) {
             // No more room in the buffer, make more:
-            client_socket_states[socket].buffer_size *= 2;
-            client_socket_states[socket].buffer =
-                realloc(client_socket_states[socket].buffer,
-                        client_socket_states[socket].buffer_size); // grow the buffer by a factor of 2
+            grow_slice(&client_states[socket].data_from);
         }
 
-        int num_bytes_read = read(socket, client_socket_states[socket].buffer +
-                client_socket_states[socket].used_bytes,
-                client_socket_states[socket].buffer_size -
-                    client_socket_states[socket].used_bytes);
+        int num_bytes_read = read(socket, client_states[socket].data_from.buffer +
+                client_states[socket].data_from.length,
+                client_states[socket].data_from.capacity -
+                    client_states[socket].data_from.length);
         if (num_bytes_read == -1) { // This return value means some "error" occurred.
-            switch(errno) {
+            switch(errno) { // TODO: Handle socket being closed.
                 case EAGAIN: break; // There may be more to read later.
                 default:
                     fprintf(stderr, "Error on socket %d\n", socket); // An actual error occurred.
-                    perror("");
+                    perror(""); // TODO: Use sprintf.
             }
             break;
         }
@@ -89,23 +118,23 @@ int handle_client(int socket) {
         // Here, we read and deal with all the messages we got at once and copy any leftover
         // bytes (the start of a next message, presumably) into the start of the buffer again.
 
-        char* const end_of_meaningful_buffer = client_socket_states[socket].buffer + client_socket_states[socket].used_bytes + num_bytes_read;
+        char* const end_of_meaningful_buffer = client_states[socket].data_from.buffer + client_states[socket].data_from.length + num_bytes_read;
 
-        char* curr_message_ptr = client_socket_states[socket].buffer;
+        char* curr_message_ptr = client_states[socket].data_from.buffer;
         // TODO: I think I can get rid of the message buffer and batch any messages gotten in one go into one big message to the clients, with lots of newlines.
         char* next_message_ptr;
         while ((next_message_ptr = (char*) memchr(curr_message_ptr, '\n', end_of_meaningful_buffer - curr_message_ptr) + 1) != NULL + 1) {
             broadcast_message(curr_message_ptr, next_message_ptr - curr_message_ptr, socket);
-            client_socket_states[socket].messages_sent++;
+            client_states[socket].messages_sent++;
             curr_message_ptr = next_message_ptr;
         }
-        if ((curr_message_ptr != client_socket_states[socket].buffer)
+        if ((curr_message_ptr != client_states[socket].data_from.buffer)
                 && (curr_message_ptr != end_of_meaningful_buffer)) {
-            memmove(client_socket_states[socket].buffer, curr_message_ptr,
+            memmove(client_states[socket].data_from.buffer, curr_message_ptr,
                     end_of_meaningful_buffer
                     - curr_message_ptr /* the start of this last message */);
         }
-        client_socket_states[socket].used_bytes = end_of_meaningful_buffer - curr_message_ptr;
+        client_states[socket].data_from.length = end_of_meaningful_buffer - curr_message_ptr;
     }
     return 1;
 }
@@ -150,17 +179,17 @@ int main(int argc, char* argv[]) {
     struct sockaddr_in server; // This "_in" has nothing at all to do with the address being an "in" address (whatever that would mean), it just means that the address is an INternet address. I really dislike APIs that can't be bothered to speak English.
 
     // Create socket
-    listen_fd = socket(AF_INET, SOCK_STREAM, 0); 
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
         // domain = AF_INET: IPv4
         // type = SOCK_STREAM: two-way stream
-        // protocol = 0: use the default protocol associated with this domain 
+        // protocol = 0: use the default protocol associated with this domain
     if (listen_fd == -1) {
         panic("Could not create socket");
     }
 
     int reuseaddr_opt = 1; // we want to set the reuseaddr option to true
     if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_opt, sizeof(reuseaddr_opt))) {
-        // SOL_SOCKET - SOcketLevel_SOCKET: set options at the socket API level 
+        // SOL_SOCKET - SOcketLevel_SOCKET: set options at the socket API level
         //      (presumably the highest level allowed)
         // SO_REUSEADDR: the actual option we're setting, allow addresses to be reused quickly when the program quits. https://www.baeldung.com/linux/socket-options-difference - tries to explain it, but explicitly refers to BSD over Linux and is confusing (and sort of conflicting with some other info online, that says that at most one socket can every have a given address-port pair - this program might conflict with that though, with multiple clients ending up connected on the same port).
         panic("setsockopt failed");
@@ -184,7 +213,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Accept incoming connections
-    fputs("Waiting for incoming connections...\n", stderr);
+    fputs("Waiting for incoming connections...\n", stdin);
 
     const int MAXEVENTS = 1000;
     struct epoll_event event; // event to use to add more file descriptors to wait on?
@@ -216,18 +245,16 @@ int main(int argc, char* argv[]) {
                 }
                 set_socket_non_blocking(conn_fd);
 
-                client_socket_states[conn_fd].buffer = calloc(INITIAL_BUFFER_SIZE, sizeof(char)); // TODO: switch to malloc to catch more bugs (there are lots of cases where we don't zero out the buffer anyway, and we shouldn't need it to be zeroed
-                client_socket_states[conn_fd].buffer_size = INITIAL_BUFFER_SIZE;
+                client_states[conn_fd].data_from = init_slice();
 
-                fprintf(stderr, "Accepted a client's connection on socket %d!\n", conn_fd);
+                fprintf(stdin, "Accepted a client's connection on socket %d!\n", conn_fd);
             } else { // We are dealing with a client connection.
                 fprintf(stderr, "Dealing with client on socket %d\n", events[i].data.fd);
                 if (!handle_client(events[i].data.fd)) {
                     fprintf(stderr, "Closing socket %d.\n", events[i].data.fd);
                     epoll_ctl(epoll_file_descriptor, EPOLL_CTL_DEL, events[i].data.fd, 0);
                     close(events[i].data.fd);
-                    free(client_socket_states[events[i].data.fd].buffer);
-                    client_socket_states[events[i].data.fd].buffer = NULL;
+                    deinit_slice(&client_states[events[i].data.fd].data_from);
                 }
             }
         }
